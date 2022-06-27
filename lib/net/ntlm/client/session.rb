@@ -36,8 +36,11 @@ module Net
         t3 = Message::Type3.create type3_opts
         if negotiate_key_exchange?
           t3.enable(:session_key)
-          rc4 = Net::NTLM::Rc4.new(user_session_key)
-          sk = rc4.encrypt exported_session_key
+          rc4 = OpenSSL::Cipher.new("rc4")
+          rc4.encrypt
+          rc4.key = user_session_key
+          sk = rc4.update exported_session_key
+          sk << rc4.final
           t3.session_key = sk
         end
         t3
@@ -47,7 +50,7 @@ module Net
         @exported_session_key ||=
           begin
             if negotiate_key_exchange?
-              OpenSSL::Random.random_bytes(16)
+              OpenSSL::Cipher.new("rc4").random_key
             else
               user_session_key
             end
@@ -58,7 +61,8 @@ module Net
         seq = sequence
         sig = OpenSSL::HMAC.digest(OpenSSL::Digest::MD5.new, client_sign_key, "#{seq}#{message}")[0..7]
         if negotiate_key_exchange?
-          sig = client_cipher.encrypt sig
+          sig = client_cipher.update sig
+          sig << client_cipher.final
         end
         "#{VERSION_MAGIC}#{sig}#{seq}"
       end
@@ -67,17 +71,20 @@ module Net
         seq = signature[-4..-1]
         sig = OpenSSL::HMAC.digest(OpenSSL::Digest::MD5.new, server_sign_key, "#{seq}#{message}")[0..7]
         if negotiate_key_exchange?
-          sig = server_cipher.encrypt sig
+          sig = server_cipher.update sig
+          sig << server_cipher.final
         end
         "#{VERSION_MAGIC}#{sig}#{seq}" == signature
       end
 
       def seal_message(message)
-        client_cipher.encrypt(message)
+        emessage = client_cipher.update(message)
+        emessage + client_cipher.final
       end
 
       def unseal_message(emessage)
-        server_cipher.encrypt(emessage)
+        message = server_cipher.update(emessage)
+        message + server_cipher.final
       end
 
       private
@@ -116,11 +123,23 @@ module Net
       end
 
       def client_cipher
-        @client_cipher ||= Net::NTLM::Rc4.new(client_seal_key)
+        @client_cipher ||=
+          begin
+            rc4 = OpenSSL::Cipher.new("rc4")
+            rc4.encrypt
+            rc4.key = client_seal_key
+            rc4
+          end
       end
 
       def server_cipher
-        @server_cipher ||= Net::NTLM::Rc4.new(server_seal_key)
+        @server_cipher ||=
+          begin
+            rc4 = OpenSSL::Cipher.new("rc4")
+            rc4.decrypt
+            rc4.key = server_seal_key
+            rc4
+          end
       end
 
       def client_challenge
